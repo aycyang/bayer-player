@@ -1,13 +1,30 @@
+#include <stdio.h>   // printf, fprintf
+#include <stdlib.h>  // abort
+
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlgpu3.h"
 
-#include <stdio.h>   // printf, fprintf
-#include <stdlib.h>  // abort
-
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+
+std::vector<uint8_t> openFile(const std::filesystem::path& path) {
+  std::vector<uint8_t> buf;
+  std::ifstream ifs(path);
+  if (!ifs) {
+    return buf;
+  }
+  ifs.seekg(0, std::ios::end);
+  buf.resize(ifs.tellg());
+  ifs.seekg(0, std::ios::beg);
+  ifs.read((char*)buf.data(), buf.size());
+  return buf;
+}
 
 // Doesn't own any of its members. Cleanup is handled by SDL lifecycle
 // callbacks.
@@ -309,11 +326,29 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
     SDL_GPURenderPass* render_pass =
         SDL_BeginGPURenderPass(command_buffer, &target_info, 1, nullptr);
 
+    std::vector<uint8_t> vertex_shader_code = openFile("vertex.metal");
+    std::vector<uint8_t> fragment_shader_code = openFile("fragment.metal");
+
+    SDL_GPUShaderCreateInfo vertex_shader_create_info = {
+        .code_size = vertex_shader_code.size(),
+        .code = vertex_shader_code.data(),
+        .format = SDL_GPU_SHADERFORMAT_MSL,
+    };
+    SDL_GPUShaderCreateInfo fragment_shader_create_info = {
+        .code_size = fragment_shader_code.size(),
+        .code = fragment_shader_code.data(),
+        .format = SDL_GPU_SHADERFORMAT_MSL,
+    };
+    SDL_GPUShader* vertex_shader =
+        SDL_CreateGPUShader(state->gpu_device, &vertex_shader_create_info);
+    SDL_GPUShader* fragment_shader =
+        SDL_CreateGPUShader(state->gpu_device, &fragment_shader_create_info);
+
     SDL_GPUGraphicsPipelineCreateInfo create_info = {
         // The vertex shader used by the graphics pipeline.
-        .vertex_shader = NULL,
+        .vertex_shader = vertex_shader,
         // The fragment shader used by the graphics pipeline.
-        .fragment_shader = NULL,
+        .fragment_shader = fragment_shader,
         // The vertex layout of the graphics pipeline.
         .vertex_input_state =
             {

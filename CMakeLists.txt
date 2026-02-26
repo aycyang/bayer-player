@@ -4,6 +4,9 @@ project(BayerPlayer)
 # For clang LSP support
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED On)
+
 # Prerequisites:
 # - On macOS: brew install sdl3
 find_package(SDL3 REQUIRED CONFIG REQUIRED COMPONENTS SDL3-shared)
