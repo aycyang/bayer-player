@@ -27,28 +27,32 @@ std::vector<uint8_t> openFile(const std::filesystem::path& path) {
   return buf;
 }
 
-SDL_GPUTransferBuffer* transferBuffer(SDL_GPUDevice* gpu_device, std::span<const uint8_t> buf) {
+SDL_GPUTransferBuffer* makeTransferBuffer(SDL_GPUDevice* gpu_device,
+                                          std::span<const std::byte> buf) {
   SDL_GPUTransferBufferCreateInfo buffer_create_info = {
       .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-      .size = static_cast<uint32_t>(buf.size_bytes()),
+      .size = static_cast<Uint32>(buf.size_bytes()),
   };
   SDL_GPUTransferBuffer* transfer_buffer =
       SDL_CreateGPUTransferBuffer(gpu_device, &buffer_create_info);
-  uint8_t* data =
-      static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(gpu_device, transfer_buffer, false));
+  std::byte* data =
+      static_cast<std::byte*>(SDL_MapGPUTransferBuffer(gpu_device, transfer_buffer, false));
   std::copy(buf.begin(), buf.end(), data);
   SDL_UnmapGPUTransferBuffer(gpu_device, transfer_buffer);
   return transfer_buffer;
 }
 
-// Doesn't own any of its members. Cleanup is handled by SDL lifecycle
-// callbacks.
+// Doesn't own any of its members. Cleanup is handled by SDL lifecycle callbacks.
 struct AppState {
   SDL_Window* window;
   SDL_GPUDevice* gpu_device;
 
   SDL_GPUTexture* my_tex;
   SDL_GPUTransferBuffer* my_tex_tb;
+
+  SDL_GPUBuffer* my_vb;
+  SDL_GPUTransferBuffer* my_vb_tb;
+  size_t my_vb_size;
 
   bool show_demo_window = false;
   bool show_another_window = false;
@@ -151,7 +155,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   *appstate = state;
 
   {
-    SDL_GPUTextureCreateInfo texture_create_info = {
+    SDL_GPUTextureCreateInfo createinfo = {
         // The base dimensionality of the texture.
         .type = SDL_GPU_TEXTURETYPE_2D,
         // The pixel format of the texture.
@@ -169,33 +173,67 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
         // The number of mip levels in the texture.
         .num_levels = 1,
     };
-    state->my_tex = SDL_CreateGPUTexture(state->gpu_device, &texture_create_info);
+    state->my_tex = SDL_CreateGPUTexture(state->gpu_device, &createinfo);
   }
 
   {
-    std::vector<uint8_t> v;
+    std::vector<std::byte> v;
     for (int i = 0; i < 256 * 256; i++) {
-      v.push_back(i);
+      v.push_back(std::byte(i));
     }
-    state->my_tex_tb = transferBuffer(state->gpu_device, v);
+    state->my_tex_tb = makeTransferBuffer(state->gpu_device, v);
+  }
+
+  {
+    // clang-format off
+    //   x   y     r  g  b  a
+    std::vector<float> v = {
+        -1, -1,    0, 0, 0, 1,
+         0,  1,    1, 0, 0, 1,
+         1, -1,    0, 1, 0, 1,
+    };
+    // clang-format on
+    state->my_vb_tb = makeTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
+    state->my_vb_size = v.size() * sizeof(float);
+  }
+
+  {
+    SDL_GPUBufferCreateInfo createinfo = {
+        .usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+        .size = static_cast<Uint32>(state->my_vb_size),
+    };
+    state->my_vb = SDL_CreateGPUBuffer(state->gpu_device, &createinfo);
   }
 
   {
     SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(state->gpu_device);
     SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
 
-    SDL_GPUTextureTransferInfo source = {
-        .transfer_buffer = state->my_tex_tb,
-        .pixels_per_row = 256,
-        .rows_per_layer = 256,
-    };
-    SDL_GPUTextureRegion destination = {
-        .texture = state->my_tex,
-        .w = 256,
-        .h = 256,
-        .d = 1,
-    };
-    SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
+    {
+      SDL_GPUTextureTransferInfo source = {
+          .transfer_buffer = state->my_tex_tb,
+          .pixels_per_row = 256,
+          .rows_per_layer = 256,
+      };
+      SDL_GPUTextureRegion destination = {
+          .texture = state->my_tex,
+          .w = 256,
+          .h = 256,
+          .d = 1,
+      };
+      SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
+    }
+
+    {
+      SDL_GPUTransferBufferLocation source = {
+          .transfer_buffer = state->my_vb_tb,
+      };
+      SDL_GPUBufferRegion destination = {
+          .buffer = state->my_vb,
+          .size = static_cast<Uint32>(state->my_vb_size),
+      };
+      SDL_UploadToGPUBuffer(copy_pass, &source, &destination, false);
+    }
 
     SDL_EndGPUCopyPass(copy_pass);
     SDL_SubmitGPUCommandBuffer(command_buffer);
@@ -306,12 +344,12 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         // The shader input location index.
         .location = 1,
         // The binding slot of the associated vertex buffer.
-        .buffer_slot = 1,
+        .buffer_slot = 0,
         // The size and type of the attribute data.
         .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4,
         // The byte offset of this attribute relative to the start of the
         // vertex element.
-        .offset = 4 * 2,
+        .offset = sizeof(float) * 2,
     };
 
     // Setup and start a render pass
@@ -334,12 +372,16 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
     SDL_GPUShaderCreateInfo vertex_shader_create_info = {
         .code_size = vertex_shader_code.size(),
         .code = vertex_shader_code.data(),
+        .entrypoint = "vs_main",
         .format = SDL_GPU_SHADERFORMAT_MSL,
+        .stage = SDL_GPU_SHADERSTAGE_VERTEX,
     };
     SDL_GPUShaderCreateInfo fragment_shader_create_info = {
         .code_size = fragment_shader_code.size(),
         .code = fragment_shader_code.data(),
+        .entrypoint = "fs_main",
         .format = SDL_GPU_SHADERFORMAT_MSL,
+        .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
     };
     SDL_GPUShader* vertex_shader =
         SDL_CreateGPUShader(state->gpu_device, &vertex_shader_create_info);
@@ -362,7 +404,7 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
                 .vertex_attributes = vertex_attributes,
                 // The number of vertex attribute descriptions in the above
                 // array.
-                .num_vertex_attributes = 1,
+                .num_vertex_attributes = 2,
             },
         // The primitive topology of the graphics pipeline.
         .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
@@ -381,15 +423,19 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
                 // omitted: has_depth_stencil_target
             },
     };
-    auto* graphics_pipeline =
-        SDL_CreateGPUGraphicsPipeline(state->gpu_device, &create_info);
+    auto* graphics_pipeline = SDL_CreateGPUGraphicsPipeline(state->gpu_device, &create_info);
     SDL_BindGPUGraphicsPipeline(render_pass, graphics_pipeline);
-    // TODO
-    // SDL_SetGPUViewport()
-    // SDL_BindGPUVertexBuffers()
-    // SDL_BindGPUVertexSamplers()
 
-    // TODO render GPUTexture
+    SDL_GPUBufferBinding gpu_buffer_bindings[1];
+    gpu_buffer_bindings[0] = {
+        .buffer = state->my_vb,
+        .offset = 0,
+    };
+    SDL_BindGPUVertexBuffers(render_pass, 0, gpu_buffer_bindings, 1);
+
+    // TODO SDL_BindGPUVertexSamplers()
+
+    SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
 
     // Render ImGui
     ImGui_ImplSDLGPU3_RenderDrawData(draw_data, command_buffer, render_pass);
