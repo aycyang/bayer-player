@@ -24,5 +24,7 @@ set(IMGUI_SRC
 
 add_executable(BayerPlayer main.cpp ${IMGUI_SRC})
 
+target_compile_options(BayerPlayer PRIVATE -Wall -Werror -Wpedantic)
+
 target_include_directories(BayerPlayer PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_link_libraries(BayerPlayer PRIVATE SDL3::SDL3)

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
 
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
@@ -26,6 +27,20 @@ std::vector<uint8_t> openFile(const std::filesystem::path& path) {
   return buf;
 }
 
+SDL_GPUTransferBuffer* transferBuffer(SDL_GPUDevice* gpu_device, std::span<const uint8_t> buf) {
+  SDL_GPUTransferBufferCreateInfo buffer_create_info = {
+      .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+      .size = static_cast<uint32_t>(buf.size_bytes()),
+  };
+  SDL_GPUTransferBuffer* transfer_buffer =
+      SDL_CreateGPUTransferBuffer(gpu_device, &buffer_create_info);
+  uint8_t* data =
+      static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(gpu_device, transfer_buffer, false));
+  std::copy(buf.begin(), buf.end(), data);
+  SDL_UnmapGPUTransferBuffer(gpu_device, transfer_buffer);
+  return transfer_buffer;
+}
+
 // Doesn't own any of its members. Cleanup is handled by SDL lifecycle
 // callbacks.
 struct AppState {
@@ -33,6 +48,7 @@ struct AppState {
   SDL_GPUDevice* gpu_device;
 
   SDL_GPUTexture* my_tex;
+  SDL_GPUTransferBuffer* my_tex_tb;
 
   bool show_demo_window = false;
   bool show_another_window = false;
@@ -67,8 +83,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   float main_scale = SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
   SDL_WindowFlags window_flags =
       SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
-  SDL_Window* window = SDL_CreateWindow("Dear ImGui SDL3+SDL_GPU example",
-                                        (int)(1280 * main_scale),
+  SDL_Window* window = SDL_CreateWindow("Dear ImGui SDL3+SDL_GPU example", (int)(1280 * main_scale),
                                         (int)(800 * main_scale), window_flags);
   if (window == nullptr) {
     printf("Error: SDL_CreateWindow(): %s\n", SDL_GetError());
@@ -78,10 +93,10 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   SDL_ShowWindow(window);
 
   // Create GPU Device
-  SDL_GPUDevice* gpu_device = SDL_CreateGPUDevice(
-      SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXIL |
-          SDL_GPU_SHADERFORMAT_MSL | SDL_GPU_SHADERFORMAT_METALLIB,
-      true, nullptr);
+  SDL_GPUDevice* gpu_device =
+      SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXIL |
+                              SDL_GPU_SHADERFORMAT_MSL | SDL_GPU_SHADERFORMAT_METALLIB,
+                          true, nullptr);
   if (gpu_device == nullptr) {
     printf("Error: SDL_CreateGPUDevice(): %s\n", SDL_GetError());
     return SDL_APP_FAILURE;
@@ -92,8 +107,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
     printf("Error: SDL_ClaimWindowForGPUDevice(): %s\n", SDL_GetError());
     return SDL_APP_FAILURE;
   }
-  SDL_SetGPUSwapchainParameters(gpu_device, window,
-                                SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+  SDL_SetGPUSwapchainParameters(gpu_device, window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
                                 SDL_GPU_PRESENTMODE_VSYNC);
 
   // Setup Dear ImGui context
@@ -125,8 +139,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   ImGui_ImplSDL3_InitForSDLGPU(window);
   ImGui_ImplSDLGPU3_InitInfo init_info = {};
   init_info.Device = gpu_device;
-  init_info.ColorTargetFormat =
-      SDL_GetGPUSwapchainTextureFormat(gpu_device, window);
+  init_info.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(gpu_device, window);
   // Only used in multi-viewports mode.
   init_info.MSAASamples = SDL_GPU_SAMPLECOUNT_1;
   // Only used in multi-viewports mode.
@@ -136,6 +149,57 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
 
   auto* state = new AppState(window, gpu_device);
   *appstate = state;
+
+  {
+    SDL_GPUTextureCreateInfo texture_create_info = {
+        // The base dimensionality of the texture.
+        .type = SDL_GPU_TEXTURETYPE_2D,
+        // The pixel format of the texture.
+        .format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+        // How the texture is intended to be used by the client.
+        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+        // The width of the texture.
+        .width = 256,
+        // The height of the texture
+        .height = 256,
+        // The layer count or depth of the texture. This value is
+        // treated as a layer count on 2D array textures, and as a
+        // depth value on 3D textures.
+        .layer_count_or_depth = 1,
+        // The number of mip levels in the texture.
+        .num_levels = 1,
+    };
+    state->my_tex = SDL_CreateGPUTexture(state->gpu_device, &texture_create_info);
+  }
+
+  {
+    std::vector<uint8_t> v;
+    for (int i = 0; i < 256 * 256; i++) {
+      v.push_back(i);
+    }
+    state->my_tex_tb = transferBuffer(state->gpu_device, v);
+  }
+
+  {
+    SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(state->gpu_device);
+    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
+
+    SDL_GPUTextureTransferInfo source = {
+        .transfer_buffer = state->my_tex_tb,
+        .pixels_per_row = 256,
+        .rows_per_layer = 256,
+    };
+    SDL_GPUTextureRegion destination = {
+        .texture = state->my_tex,
+        .w = 256,
+        .h = 256,
+        .d = 1,
+    };
+    SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
+
+    SDL_EndGPUCopyPass(copy_pass);
+    SDL_SubmitGPUCommandBuffer(command_buffer);
+  }
 
   return SDL_APP_CONTINUE;
 }
@@ -196,84 +260,14 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
   // Rendering
   ImGui::Render();
   ImDrawData* draw_data = ImGui::GetDrawData();
-  const bool is_minimized =
-      (draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f);
+  const bool is_minimized = (draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f);
 
-  // Acquire a GPU command buffer
-  SDL_GPUCommandBuffer* command_buffer =
-      SDL_AcquireGPUCommandBuffer(state->gpu_device);
-
-  // Create texture if needed
-  if (!state->my_tex) {
-    SDL_GPUTextureCreateInfo texture_create_info = {
-        // The base dimensionality of the texture.
-        .type = SDL_GPU_TEXTURETYPE_2D,
-        // The pixel format of the texture.
-        .format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
-        // How the texture is intended to be used by the client.
-        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-        // The width of the texture.
-        .width = 256,
-        // The height of the texture
-        .height = 256,
-        // The layer count or depth of the texture. This value is
-        // treated as a layer count on 2D array textures, and as a
-        // depth value on 3D textures.
-        .layer_count_or_depth = 1,
-        // The number of mip levels in the texture.
-        .num_levels = 1,
-    };
-    SDL_GPUTexture* texture =
-        SDL_CreateGPUTexture(state->gpu_device, &texture_create_info);
-    SDL_GPUTransferBufferCreateInfo buffer_create_info = {
-        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, .size = 256 * 256};
-    SDL_GPUTransferBuffer* transfer_buffer =
-        SDL_CreateGPUTransferBuffer(state->gpu_device, &buffer_create_info);
-    uint8_t* pixels = static_cast<uint8_t*>(
-        SDL_MapGPUTransferBuffer(state->gpu_device, transfer_buffer, false));
-    for (int i = 0; i < 256 * 256; i++) {
-      pixels[i] = i;
-    }
-    SDL_UnmapGPUTransferBuffer(state->gpu_device, transfer_buffer);
-
-    SDL_GPUTransferBufferLocation location = {
-        .transfer_buffer = transfer_buffer, .offset = 0};
-    SDL_GPUTextureTransferInfo source = {.transfer_buffer = transfer_buffer,
-                                         .offset = 0,
-                                         .pixels_per_row = 256,
-                                         .rows_per_layer = 256};
-    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
-    SDL_GPUTextureRegion destination = {
-        // The texture used in the copy operation.
-        .texture = texture,
-        // The mip level index to transfer.
-        .mip_level = 0,
-        // The layer index to transfer.
-        .layer = 0,
-        // The left offset of the region.
-        .x = 0,
-        // The top offset of the region.
-        .y = 0,
-        // The front offset of the region.
-        .z = 0,
-        // The width of the region.
-        .w = 256,
-        // The height of the region.
-        .h = 256,
-        // The depth of the region.
-        .d = 1,
-    };
-    SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
-    SDL_EndGPUCopyPass(copy_pass);
-
-    state->my_tex = texture;
-    printf("uploaded texture\n");
-  }
+  SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(state->gpu_device);
 
   SDL_GPUTexture* swapchain_texture;
   // Acquire a swapchain texture
-  SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, state->window,
-                                        &swapchain_texture, nullptr, nullptr);
+  SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, state->window, &swapchain_texture, nullptr,
+                                        nullptr);
 
   if (swapchain_texture != nullptr && !is_minimized) {
     // This is mandatory: call ImGui_ImplSDLGPU3_PrepareDrawData() to upload
@@ -281,8 +275,7 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
     ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, command_buffer);
 
     SDL_GPUColorTargetDescription target_desc = {
-        .format =
-            SDL_GetGPUSwapchainTextureFormat(state->gpu_device, state->window),
+        .format = SDL_GetGPUSwapchainTextureFormat(state->gpu_device, state->window),
         // omitted: blend_state
     };
 
@@ -291,32 +284,41 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         // The binding slot of the vertex buffer.
         .slot = 0,
         // The size of a single element + the offset between elements.
-        .pitch = 0,
+        .pitch = sizeof(float) * 6,
         // omitted: input_rate
         // omitted: instance_step_rate
     };
 
-    SDL_GPUVertexAttribute vertex_attributes[1];
+    SDL_GPUVertexAttribute vertex_attributes[2];
     vertex_attributes[0] = {
         // The shader input location index.
         .location = 0,
         // The binding slot of the associated vertex buffer.
         .buffer_slot = 0,
         // The size and type of the attribute data.
-        .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4,
+        .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
         // The byte offset of this attribute relative to the start of the
         // vertex element.
         .offset = 0,
     };
 
-    // TODO SDL_CreateShader()
+    vertex_attributes[1] = {
+        // The shader input location index.
+        .location = 1,
+        // The binding slot of the associated vertex buffer.
+        .buffer_slot = 1,
+        // The size and type of the attribute data.
+        .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4,
+        // The byte offset of this attribute relative to the start of the
+        // vertex element.
+        .offset = 4 * 2,
+    };
 
     // Setup and start a render pass
     SDL_GPUColorTargetInfo target_info = {};
     target_info.texture = swapchain_texture;
-    target_info.clear_color =
-        SDL_FColor{state->clear_color.x, state->clear_color.y,
-                   state->clear_color.z, state->clear_color.w};
+    target_info.clear_color = SDL_FColor{state->clear_color.x, state->clear_color.y,
+                                         state->clear_color.z, state->clear_color.w};
     target_info.load_op = SDL_GPU_LOADOP_CLEAR;
     target_info.store_op = SDL_GPU_STOREOP_STORE;
     target_info.mip_level = 0;
