@@ -2,6 +2,11 @@
 
 A tool for experimenting with image dithering algorithms
 
+### TODO
+- [x] texture sampling
+- [ ] image upload
+- [ ] shader cross compile
+
 ### Notes
 - decided to go with GPU API
   - WebGPU backend for SDL3 GPU API doesn't exist yet but it's on the roadmap, maybe for 3.6.0

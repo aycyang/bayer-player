@@ -7,7 +7,11 @@ struct VertexOutput
     float4 color;
 };
 
-fragment float4 fs_main(VertexOutput in [[stage_in]])
+fragment float4 fs_main(
+  VertexOutput in [[stage_in]],
+  texture2d<float> tex [[texture(0)]],
+  sampler texSampler [[sampler(0)]]
+)
 {
-    return in.color;
+    return tex.sample(texSampler, in.color.xy);
 }

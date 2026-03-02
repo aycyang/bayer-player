@@ -29,23 +29,25 @@ std::vector<uint8_t> openFile(const std::filesystem::path& path) {
 
 SDL_GPUTransferBuffer* makeTransferBuffer(SDL_GPUDevice* gpu_device,
                                           std::span<const std::byte> buf) {
-  SDL_GPUTransferBufferCreateInfo buffer_create_info = {
+  SDL_GPUTransferBufferCreateInfo createinfo = {
       .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
       .size = static_cast<Uint32>(buf.size_bytes()),
   };
-  SDL_GPUTransferBuffer* transfer_buffer =
-      SDL_CreateGPUTransferBuffer(gpu_device, &buffer_create_info);
-  std::byte* data =
-      static_cast<std::byte*>(SDL_MapGPUTransferBuffer(gpu_device, transfer_buffer, false));
+  SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(gpu_device, &createinfo);
+
+  std::byte* data = static_cast<std::byte*>(SDL_MapGPUTransferBuffer(gpu_device, tb, false));
   std::copy(buf.begin(), buf.end(), data);
-  SDL_UnmapGPUTransferBuffer(gpu_device, transfer_buffer);
-  return transfer_buffer;
+  SDL_UnmapGPUTransferBuffer(gpu_device, tb);
+
+  return tb;
 }
 
 // Doesn't own any of its members. Cleanup is handled by SDL lifecycle callbacks.
 struct AppState {
   SDL_Window* window;
   SDL_GPUDevice* gpu_device;
+
+  SDL_GPUSampler* my_sampler;
 
   SDL_GPUTexture* my_tex;
   SDL_GPUTransferBuffer* my_tex_tb;
@@ -61,21 +63,6 @@ struct AppState {
   AppState(SDL_Window* window, SDL_GPUDevice* gpu_device)
       : window(window), gpu_device(gpu_device) {}
 };
-
-SDL_Palette* grayscalePalette() {
-  SDL_Color colors[256];
-  uint8_t i = 0;
-  for (auto& color : colors) {
-    color.r = i;
-    color.g = i;
-    color.b = i;
-    color.a = 0xff;
-    i++;
-  }
-  SDL_Palette* palette = SDL_CreatePalette(256);
-  SDL_SetPaletteColors(palette, colors, 0, 256);
-  return palette;
-}
 
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
@@ -155,11 +142,16 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   *appstate = state;
 
   {
+    SDL_GPUSamplerCreateInfo createinfo = {};
+    state->my_sampler = SDL_CreateGPUSampler(state->gpu_device, &createinfo);
+  }
+
+  {
     SDL_GPUTextureCreateInfo createinfo = {
         // The base dimensionality of the texture.
         .type = SDL_GPU_TEXTURETYPE_2D,
         // The pixel format of the texture.
-        .format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+        .format = SDL_GPU_TEXTUREFORMAT_R32_FLOAT,
         // How the texture is intended to be used by the client.
         .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
         // The width of the texture.
@@ -177,20 +169,33 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   }
 
   {
-    std::vector<std::byte> v;
-    for (int i = 0; i < 256 * 256; i++) {
-      v.push_back(std::byte(i));
+    int w = 256;
+    int h = 256;
+    std::vector<float> v(w * h, 0);
+    for (int y = 0; y < h; y++) {
+      int dy = abs(y - h / 2);
+      for (int x = 0; x < w; x++) {
+        int dx = abs(x - w / 2);
+        int r = sqrt(dx * dx + dy * dy);
+        if (r > std::min(w, h) / 2) continue;
+        int i = y * w + x;
+        v[i] = 1;
+      }
     }
-    state->my_tex_tb = makeTransferBuffer(state->gpu_device, v);
+    state->my_tex_tb = makeTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
   }
 
   {
     // clang-format off
-    //   x   y     r  g  b  a
+    //    x    y     r  g  b  a
     std::vector<float> v = {
-        -1, -1,    0, 0, 0, 1,
-         0,  1,    1, 0, 0, 1,
-         1, -1,    0, 1, 0, 1,
+        -.5, -.5,    0, 0, 0, 1,
+        -.5,  .5,    0, 1, 0, 1,
+         .5,  .5,    1, 1, 0, 1,
+
+        -.5, -.5,    0, 0, 0, 1,
+         .5, -.5,    1, 0, 0, 1,
+         .5,  .5,    1, 1, 0, 1,
     };
     // clang-format on
     state->my_vb_tb = makeTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
@@ -382,6 +387,7 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         .entrypoint = "fs_main",
         .format = SDL_GPU_SHADERFORMAT_MSL,
         .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+        .num_samplers = 1,
     };
     SDL_GPUShader* vertex_shader =
         SDL_CreateGPUShader(state->gpu_device, &vertex_shader_create_info);
@@ -433,9 +439,14 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
     };
     SDL_BindGPUVertexBuffers(render_pass, 0, gpu_buffer_bindings, 1);
 
-    // TODO SDL_BindGPUVertexSamplers()
+    SDL_GPUTextureSamplerBinding texture_sampler_bindings[1];
+    texture_sampler_bindings[0] = {
+        .texture = state->my_tex,
+        .sampler = state->my_sampler,
+    };
+    SDL_BindGPUFragmentSamplers(render_pass, 0, texture_sampler_bindings, 1);
 
-    SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
+    SDL_DrawGPUPrimitives(render_pass, 6, 1, 0, 0);
 
     // Render ImGui
     ImGui_ImplSDLGPU3_RenderDrawData(draw_data, command_buffer, render_pass);
