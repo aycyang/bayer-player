@@ -264,17 +264,16 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   }
 
   {
-    // TODO change this from rgba to uv
     // clang-format off
-    //    x    y     r  g  b  a
+    //    x    y     u  v
     std::vector<float> v = {
-        -.5, -.5,    0, 1, 0, 1,
-        -.5,  .5,    0, 0, 0, 1,
-         .5,  .5,    1, 0, 0, 1,
+        -.5, -.5,    0, 1,
+        -.5,  .5,    0, 0,
+         .5,  .5,    1, 0,
 
-        -.5, -.5,    0, 1, 0, 1,
-         .5, -.5,    1, 1, 0, 1,
-         .5,  .5,    1, 0, 0, 1,
+        -.5, -.5,    0, 1,
+         .5, -.5,    1, 1,
+         .5,  .5,    1, 0,
     };
     // clang-format on
     state->my_vb_tb = makeTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
@@ -410,7 +409,7 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         // The binding slot of the vertex buffer.
         .slot = 0,
         // The size of a single element + the offset between elements.
-        .pitch = sizeof(float) * 6,
+        .pitch = sizeof(float) * 4,
         // omitted: input_rate
         // omitted: instance_step_rate
     };
@@ -434,7 +433,7 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         // The binding slot of the associated vertex buffer.
         .buffer_slot = 0,
         // The size and type of the attribute data.
-        .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4,
+        .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
         // The byte offset of this attribute relative to the start of the
         // vertex element.
         .offset = sizeof(float) * 2,

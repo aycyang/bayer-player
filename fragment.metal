@@ -4,7 +4,7 @@ using namespace metal;
 struct VertexOutput
 {
     float4 position [[position]];
-    float4 color;
+    float2 uv;
 };
 
 fragment float4 fs_main(
@@ -13,5 +13,5 @@ fragment float4 fs_main(
   sampler texSampler [[sampler(0)]]
 )
 {
-    return tex.sample(texSampler, in.color.xy);
+    return tex.sample(texSampler, in.uv);
 }
