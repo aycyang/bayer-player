@@ -48,17 +48,12 @@ struct AppState {
   SDL_Window* window;
   SDL_GPUDevice* gpu_device;
 
-  SDL_GPUTexture* img_tex;
-
   SDL_GPUTexture* my_tex;
   SDL_GPUSampler* my_sampler;
-  // TODO don't need to keep this around
-  SDL_GPUTransferBuffer* my_tex_tb;
+
+  SDL_GPUTexture* img_tex;
 
   SDL_GPUBuffer* my_vb;
-  size_t my_vb_size;
-  // TODO don't need to keep this around
-  SDL_GPUTransferBuffer* my_vb_tb;
 
   bool show_demo_window = false;
   bool show_another_window = false;
@@ -223,99 +218,79 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   }
 
   {
-    SDL_GPUTextureCreateInfo createinfo = {
-        // The base dimensionality of the texture.
-        .type = SDL_GPU_TEXTURETYPE_2D,
-        // The pixel format of the texture.
-        .format = SDL_GPU_TEXTUREFORMAT_R32_FLOAT,
-        // How the texture is intended to be used by the client.
-        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-        // The width of the texture.
-        .width = 256,
-        // The height of the texture
-        .height = 256,
-        // The layer count or depth of the texture. This value is
-        // treated as a layer count on 2D array textures, and as a
-        // depth value on 3D textures.
-        .layer_count_or_depth = 1,
-        // The number of mip levels in the texture.
-        .num_levels = 1,
-    };
-    state->my_tex = SDL_CreateGPUTexture(state->gpu_device, &createinfo);
-  }
-
-  {
-    int w = 256;
-    int h = 256;
-    std::vector<float> v(w * h, 0);
-    for (int y = 0; y < h; y++) {
-      int dy = abs(y - h / 2);
-      for (int x = 0; x < w; x++) {
-        int dx = abs(x - w / 2);
-        int r = sqrt(dx * dx + dy * dy);
-        if (r > std::min(w, h) / 2) {
-          continue;
-        }
-        int i = y * w + x;
-        v[i] = 1;
-      }
-    }
-    state->my_tex_tb = makeTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
-  }
-
-  {
-    // clang-format off
-    //    x    y     u  v
-    std::vector<float> v = {
-        -.5, -.5,    0, 1,
-        -.5,  .5,    0, 0,
-         .5,  .5,    1, 0,
-
-        -.5, -.5,    0, 1,
-         .5, -.5,    1, 1,
-         .5,  .5,    1, 0,
-    };
-    // clang-format on
-    state->my_vb_tb = makeTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
-    state->my_vb_size = v.size() * sizeof(float);
-  }
-
-  {
-    SDL_GPUBufferCreateInfo createinfo = {
-        .usage = SDL_GPU_BUFFERUSAGE_VERTEX,
-        .size = static_cast<Uint32>(state->my_vb_size),
-    };
-    state->my_vb = SDL_CreateGPUBuffer(state->gpu_device, &createinfo);
-  }
-
-  {
     SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(state->gpu_device);
     SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
 
     {
-      SDL_GPUTextureTransferInfo source = {
-          .transfer_buffer = state->my_tex_tb,
-          .pixels_per_row = 256,
-          .rows_per_layer = 256,
+      Uint32 w = 32;
+      Uint32 h = 32;
+      SDL_GPUTextureCreateInfo createinfo = {
+          .type = SDL_GPU_TEXTURETYPE_2D,
+          .format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+          .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+          .width = w,
+          .height = h,
+          .layer_count_or_depth = 1,
+          .num_levels = 1,
       };
-      SDL_GPUTextureRegion destination = {
+      state->my_tex = SDL_CreateGPUTexture(state->gpu_device, &createinfo);
+      std::vector<std::byte> v(w * h, std::byte(0));
+      for (int y = 0; y < h; y++) {
+        int dy = abs(y - static_cast<int>(h) / 2);
+        for (int x = 0; x < w; x++) {
+          int dx = abs(x - static_cast<int>(w) / 2);
+          int r = sqrt(dx * dx + dy * dy);
+          if (r > std::min(w, h) / 2) {
+            continue;
+          }
+          int i = y * w + x;
+          v[i] = std::byte(0xff);
+        }
+      }
+      SDL_GPUTransferBuffer* tb =
+          makeTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
+      SDL_GPUTextureTransferInfo src = {
+          .transfer_buffer = tb,
+          .pixels_per_row = w,
+          .rows_per_layer = h,
+      };
+      SDL_GPUTextureRegion dst = {
           .texture = state->my_tex,
-          .w = 256,
-          .h = 256,
+          .w = w,
+          .h = h,
           .d = 1,
       };
-      SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
+      SDL_UploadToGPUTexture(copy_pass, &src, &dst, false);
     }
 
     {
-      SDL_GPUTransferBufferLocation source = {
-          .transfer_buffer = state->my_vb_tb,
+      // clang-format off
+      //    x    y     u  v
+      std::vector<float> v = {
+          -.5, -.5,    0, 1,
+          -.5,  .5,    0, 0,
+           .5,  .5,    1, 0,
+
+          -.5, -.5,    0, 1,
+           .5, -.5,    1, 1,
+           .5,  .5,    1, 0,
       };
-      SDL_GPUBufferRegion destination = {
+      // clang-format on
+      std::span<const std::byte> b = std::as_bytes(std::span(v));
+      SDL_GPUTransferBuffer* tb = makeTransferBuffer(state->gpu_device, b);
+      SDL_GPUBufferCreateInfo createinfo = {
+          .usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+          .size = static_cast<Uint32>(b.size_bytes()),
+      };
+      state->my_vb = SDL_CreateGPUBuffer(state->gpu_device, &createinfo);
+      SDL_GPUTransferBufferLocation src = {
+          .transfer_buffer = tb,
+      };
+      SDL_GPUBufferRegion dst = {
           .buffer = state->my_vb,
-          .size = static_cast<Uint32>(state->my_vb_size),
+          .size = static_cast<Uint32>(b.size_bytes()),
       };
-      SDL_UploadToGPUBuffer(copy_pass, &source, &destination, false);
+      SDL_UploadToGPUBuffer(copy_pass, &src, &dst, false);
     }
 
     SDL_EndGPUCopyPass(copy_pass);
