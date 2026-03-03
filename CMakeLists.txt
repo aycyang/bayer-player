@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED On)
 # Prerequisites:
 # - On macOS: brew install sdl3
 find_package(SDL3 REQUIRED CONFIG REQUIRED COMPONENTS SDL3-shared)
+find_package(SDL3_image REQUIRED CONFIG REQUIRED)
 
 set(IMGUI_DIR imgui)
 set(IMGUI_SRC
@@ -27,4 +28,4 @@ add_executable(BayerPlayer main.cpp ${IMGUI_SRC})
 target_compile_options(BayerPlayer PRIVATE -Wall -Werror -Wpedantic)
 
 target_include_directories(BayerPlayer PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends)
-target_link_libraries(BayerPlayer PRIVATE SDL3::SDL3)
+target_link_libraries(BayerPlayer PRIVATE SDL3::SDL3 SDL3_image::SDL3_image)

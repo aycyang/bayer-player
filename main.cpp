@@ -13,6 +13,7 @@
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <SDL3_image/SDL_image.h>
 
 std::vector<uint8_t> openFile(const std::filesystem::path& path) {
   std::vector<uint8_t> buf;
@@ -28,15 +29,15 @@ std::vector<uint8_t> openFile(const std::filesystem::path& path) {
 }
 
 SDL_GPUTransferBuffer* makeTransferBuffer(SDL_GPUDevice* gpu_device,
-                                          std::span<const std::byte> buf) {
+                                          std::span<const std::byte> src) {
   SDL_GPUTransferBufferCreateInfo createinfo = {
       .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-      .size = static_cast<Uint32>(buf.size_bytes()),
+      .size = static_cast<Uint32>(src.size_bytes()),
   };
   SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(gpu_device, &createinfo);
 
-  std::byte* data = static_cast<std::byte*>(SDL_MapGPUTransferBuffer(gpu_device, tb, false));
-  std::copy(buf.begin(), buf.end(), data);
+  std::byte* dst = static_cast<std::byte*>(SDL_MapGPUTransferBuffer(gpu_device, tb, false));
+  std::copy(src.begin(), src.end(), dst);
   SDL_UnmapGPUTransferBuffer(gpu_device, tb);
 
   return tb;
@@ -47,14 +48,17 @@ struct AppState {
   SDL_Window* window;
   SDL_GPUDevice* gpu_device;
 
-  SDL_GPUSampler* my_sampler;
+  SDL_GPUTexture* img_tex;
 
   SDL_GPUTexture* my_tex;
+  SDL_GPUSampler* my_sampler;
+  // TODO don't need to keep this around
   SDL_GPUTransferBuffer* my_tex_tb;
 
   SDL_GPUBuffer* my_vb;
-  SDL_GPUTransferBuffer* my_vb_tb;
   size_t my_vb_size;
+  // TODO don't need to keep this around
+  SDL_GPUTransferBuffer* my_vb_tb;
 
   bool show_demo_window = false;
   bool show_another_window = false;
@@ -63,6 +67,78 @@ struct AppState {
   AppState(SDL_Window* window, SDL_GPUDevice* gpu_device)
       : window(window), gpu_device(gpu_device) {}
 };
+
+SDL_GPUTexture* createGPUTextureFromSurface(SDL_GPUDevice* gpu_device, SDL_Surface* surface) {
+  assert(surface);
+  assert(surface->format == SDL_PIXELFORMAT_RGBA32);
+
+  Uint32 w = surface->w;
+  Uint32 h = surface->h;
+
+  SDL_GPUTexture* gpu_texture;
+  {
+    SDL_GPUTextureCreateInfo createinfo = {
+        .type = SDL_GPU_TEXTURETYPE_2D,
+        .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+        .width = w,
+        .height = h,
+        .layer_count_or_depth = 1,
+        .num_levels = 1,
+    };
+    gpu_texture = SDL_CreateGPUTexture(gpu_device, &createinfo);
+  }
+
+  {
+    SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(gpu_device);
+    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
+    {
+      std::span<const std::byte> pixels(static_cast<std::byte*>(surface->pixels), w * h * 4);
+      SDL_GPUTransferBuffer* tb = makeTransferBuffer(gpu_device, pixels);
+      SDL_GPUTextureTransferInfo src = {
+          .transfer_buffer = tb,
+          .pixels_per_row = w,
+          .rows_per_layer = h,
+      };
+      SDL_GPUTextureRegion dst = {
+          .texture = gpu_texture,
+          .w = w,
+          .h = h,
+          .d = 1,
+      };
+      SDL_UploadToGPUTexture(copy_pass, &src, &dst, false);
+    }
+    SDL_EndGPUCopyPass(copy_pass);
+    SDL_SubmitGPUCommandBuffer(command_buffer);
+  }
+
+  return gpu_texture;
+}
+
+void uploadImgCallback(void* userdata, const char* const* filelist, int filter) {
+  if (filelist == NULL) {
+    printf("Error: open file dialog: %s\n", SDL_GetError());
+    return;
+  }
+
+  const char* file = filelist[0];
+  if (file == NULL) {
+    // Operation canceled by user.
+    return;
+  }
+
+  SDL_Surface* loaded_surface = IMG_Load(file);
+  SDL_Surface* std_fmt_surface = SDL_ConvertSurface(loaded_surface, SDL_PIXELFORMAT_RGBA32);
+
+  AppState* state = static_cast<AppState*>(userdata);
+  if (state->img_tex) {
+    SDL_ReleaseGPUTexture(state->gpu_device, state->img_tex);
+  }
+  state->img_tex = createGPUTextureFromSurface(state->gpu_device, std_fmt_surface);
+
+  SDL_DestroySurface(loaded_surface);
+  SDL_DestroySurface(std_fmt_surface);
+}
 
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
@@ -177,7 +253,9 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
       for (int x = 0; x < w; x++) {
         int dx = abs(x - w / 2);
         int r = sqrt(dx * dx + dy * dy);
-        if (r > std::min(w, h) / 2) continue;
+        if (r > std::min(w, h) / 2) {
+          continue;
+        }
         int i = y * w + x;
         v[i] = 1;
       }
@@ -186,16 +264,17 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
   }
 
   {
+    // TODO change this from rgba to uv
     // clang-format off
     //    x    y     r  g  b  a
     std::vector<float> v = {
-        -.5, -.5,    0, 0, 0, 1,
-        -.5,  .5,    0, 1, 0, 1,
-         .5,  .5,    1, 1, 0, 1,
+        -.5, -.5,    0, 1, 0, 1,
+        -.5,  .5,    0, 0, 0, 1,
+         .5,  .5,    1, 0, 0, 1,
 
-        -.5, -.5,    0, 0, 0, 1,
-         .5, -.5,    1, 0, 0, 1,
-         .5,  .5,    1, 1, 0, 1,
+        -.5, -.5,    0, 1, 0, 1,
+         .5, -.5,    1, 1, 0, 1,
+         .5,  .5,    1, 0, 0, 1,
     };
     // clang-format on
     state->my_vb_tb = makeTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
@@ -284,6 +363,10 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
 
     static char buf[64];
     ImGui::InputTextMultiline("string", buf, IM_COUNTOF(buf));
+
+    if (ImGui::Button("Upload image")) {
+      SDL_ShowOpenFileDialog(uploadImgCallback, state, state->window, NULL, 0, NULL, false);
+    }
 
     ImGui::End();
   }
@@ -441,7 +524,7 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
 
     SDL_GPUTextureSamplerBinding texture_sampler_bindings[1];
     texture_sampler_bindings[0] = {
-        .texture = state->my_tex,
+        .texture = state->img_tex ? state->img_tex : state->my_tex,
         .sampler = state->my_sampler,
     };
     SDL_BindGPUFragmentSamplers(render_pass, 0, texture_sampler_bindings, 1);
