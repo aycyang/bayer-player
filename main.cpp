@@ -28,8 +28,8 @@ std::vector<uint8_t> openFile(const std::filesystem::path& path) {
   return buf;
 }
 
-SDL_GPUTransferBuffer* makeTransferBuffer(SDL_GPUDevice* gpu_device,
-                                          std::span<const std::byte> src) {
+SDL_GPUTransferBuffer* makeUploadTransferBuffer(SDL_GPUDevice* gpu_device,
+                                                std::span<const std::byte> src) {
   SDL_GPUTransferBufferCreateInfo createinfo = {
       .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
       .size = static_cast<Uint32>(src.size_bytes()),
@@ -43,6 +43,13 @@ SDL_GPUTransferBuffer* makeTransferBuffer(SDL_GPUDevice* gpu_device,
   return tb;
 }
 
+struct Uniforms {
+  float r = 1;
+  float g = 0;
+  float b = 1;
+  float a = 1;
+};
+
 // Doesn't own any of its members. Cleanup is handled by SDL lifecycle callbacks.
 struct AppState {
   SDL_Window* window;
@@ -55,13 +62,42 @@ struct AppState {
 
   SDL_GPUBuffer* my_vb;
 
+  Uniforms uniforms;
+  SDL_GPUBuffer* uniforms_gpu;
+  SDL_GPUTransferBuffer* uniforms_tb;
+
   bool show_demo_window = false;
   bool show_another_window = false;
   ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
   AppState(SDL_Window* window, SDL_GPUDevice* gpu_device)
       : window(window), gpu_device(gpu_device) {}
+
+  void uploadUniforms(SDL_GPUCopyPass* copy_pass);
 };
+
+void AppState::uploadUniforms(SDL_GPUCopyPass* copy_pass) {
+  assert(uniforms_tb);
+  assert(uniforms_gpu);
+
+  {
+    std::span<const std::byte> src(reinterpret_cast<std::byte*>(&uniforms), sizeof(uniforms));
+    void* dst = SDL_MapGPUTransferBuffer(gpu_device, uniforms_tb, true);
+    std::copy(src.begin(), src.end(), static_cast<std::byte*>(dst));
+    SDL_UnmapGPUTransferBuffer(gpu_device, uniforms_tb);
+  }
+
+  {
+    SDL_GPUTransferBufferLocation src = {
+        .transfer_buffer = uniforms_tb,
+    };
+    SDL_GPUBufferRegion dst = {
+        .buffer = uniforms_gpu,
+        .size = static_cast<Uint32>(sizeof(uniforms)),
+    };
+    SDL_UploadToGPUBuffer(copy_pass, &src, &dst, true);
+  }
+}
 
 SDL_GPUTexture* createGPUTextureFromSurface(SDL_GPUDevice* gpu_device, SDL_Surface* surface) {
   assert(surface);
@@ -89,7 +125,7 @@ SDL_GPUTexture* createGPUTextureFromSurface(SDL_GPUDevice* gpu_device, SDL_Surfa
     SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
     {
       std::span<const std::byte> pixels(static_cast<std::byte*>(surface->pixels), w * h * 4);
-      SDL_GPUTransferBuffer* tb = makeTransferBuffer(gpu_device, pixels);
+      SDL_GPUTransferBuffer* tb = makeUploadTransferBuffer(gpu_device, pixels);
       SDL_GPUTextureTransferInfo src = {
           .transfer_buffer = tb,
           .pixels_per_row = w,
@@ -248,7 +284,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
         }
       }
       SDL_GPUTransferBuffer* tb =
-          makeTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
+          makeUploadTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
       SDL_GPUTextureTransferInfo src = {
           .transfer_buffer = tb,
           .pixels_per_row = w,
@@ -277,7 +313,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
       };
       // clang-format on
       std::span<const std::byte> b = std::as_bytes(std::span(v));
-      SDL_GPUTransferBuffer* tb = makeTransferBuffer(state->gpu_device, b);
+      SDL_GPUTransferBuffer* tb = makeUploadTransferBuffer(state->gpu_device, b);
       SDL_GPUBufferCreateInfo createinfo = {
           .usage = SDL_GPU_BUFFERUSAGE_VERTEX,
           .size = static_cast<Uint32>(b.size_bytes()),
@@ -291,6 +327,23 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
           .size = static_cast<Uint32>(b.size_bytes()),
       };
       SDL_UploadToGPUBuffer(copy_pass, &src, &dst, false);
+    }
+
+    {
+      SDL_GPUBufferCreateInfo createinfo = {
+          .usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+          .size = static_cast<Uint32>(sizeof(state->uniforms)),
+      };
+      state->uniforms_gpu = SDL_CreateGPUBuffer(state->gpu_device, &createinfo);
+    }
+
+    {
+      SDL_GPUTransferBufferCreateInfo createinfo = {
+          .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+          .size = static_cast<Uint32>(sizeof(state->uniforms)),
+      };
+      state->uniforms_tb = SDL_CreateGPUTransferBuffer(gpu_device, &createinfo);
+      state->uploadUniforms(copy_pass);
     }
 
     SDL_EndGPUCopyPass(copy_pass);
@@ -414,6 +467,10 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         .offset = sizeof(float) * 2,
     };
 
+    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
+    state->uploadUniforms(copy_pass);
+    SDL_EndGPUCopyPass(copy_pass);
+
     // Setup and start a render pass
     SDL_GPUColorTargetInfo target_info = {};
     target_info.texture = swapchain_texture;
@@ -445,6 +502,7 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         .format = SDL_GPU_SHADERFORMAT_MSL,
         .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
         .num_samplers = 2,
+        .num_storage_buffers = 1,
     };
     SDL_GPUShader* vertex_shader =
         SDL_CreateGPUShader(state->gpu_device, &vertex_shader_create_info);
@@ -486,6 +544,7 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
                 // omitted: has_depth_stencil_target
             },
     };
+    // TODO only need to do this once at program start
     auto* graphics_pipeline = SDL_CreateGPUGraphicsPipeline(state->gpu_device, &create_info);
     SDL_BindGPUGraphicsPipeline(render_pass, graphics_pipeline);
 
@@ -506,6 +565,8 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         .sampler = state->my_sampler,
     };
     SDL_BindGPUFragmentSamplers(render_pass, 0, texture_sampler_bindings, 2);
+
+    SDL_BindGPUFragmentStorageBuffers(render_pass, 0, &state->uniforms_gpu, 1);
 
     SDL_DrawGPUPrimitives(render_pass, 6, 1, 0, 0);
 

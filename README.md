@@ -4,7 +4,8 @@ A tool for experimenting with image dithering algorithms
 
 ### TODO
 - [x] texture sampling
-- [ ] image upload
+- [x] image upload
+- [ ] upload uniform buffer every frame
 - [ ] shader cross compile
 
 ### Notes
