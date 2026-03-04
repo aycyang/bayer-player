@@ -225,7 +225,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
       Uint32 w = 32;
       Uint32 h = 32;
       SDL_GPUTextureCreateInfo createinfo = {
-          .type = SDL_GPU_TEXTURETYPE_2D,
+          .type = SDL_GPU_TEXTURETYPE_3D,
           .format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
           .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
           .width = w,
@@ -444,7 +444,7 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         .entrypoint = "fs_main",
         .format = SDL_GPU_SHADERFORMAT_MSL,
         .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-        .num_samplers = 1,
+        .num_samplers = 2,
     };
     SDL_GPUShader* vertex_shader =
         SDL_CreateGPUShader(state->gpu_device, &vertex_shader_create_info);
@@ -496,12 +496,16 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
     };
     SDL_BindGPUVertexBuffers(render_pass, 0, gpu_buffer_bindings, 1);
 
-    SDL_GPUTextureSamplerBinding texture_sampler_bindings[1];
+    SDL_GPUTextureSamplerBinding texture_sampler_bindings[2];
     texture_sampler_bindings[0] = {
+        .texture = state->my_tex,
+        .sampler = state->my_sampler,
+    };
+    texture_sampler_bindings[1] = {
         .texture = state->img_tex ? state->img_tex : state->my_tex,
         .sampler = state->my_sampler,
     };
-    SDL_BindGPUFragmentSamplers(render_pass, 0, texture_sampler_bindings, 1);
+    SDL_BindGPUFragmentSamplers(render_pass, 0, texture_sampler_bindings, 2);
 
     SDL_DrawGPUPrimitives(render_pass, 6, 1, 0, 0);
 

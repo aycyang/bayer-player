@@ -9,9 +9,11 @@ struct VertexOutput
 
 fragment float4 fs_main(
   VertexOutput in [[stage_in]],
-  texture2d<float> tex [[texture(0)]],
-  sampler texSampler [[sampler(0)]]
+  texture3d<float> tex [[texture(0)]],
+  sampler texSampler [[sampler(0)]],
+  texture2d<float> imgTex [[texture(1)]],
+  sampler imgTexSampler [[sampler(1)]]
 )
 {
-    return tex.sample(texSampler, in.uv);
+    return imgTex.sample(imgTexSampler, in.uv);
 }
