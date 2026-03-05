@@ -10,6 +10,7 @@ struct VertexOutput
 struct Uniforms
 {
     int frame_index;
+    int show_mask;
 };
 
 fragment float4 fs_main(
@@ -21,7 +22,15 @@ fragment float4 fs_main(
   sampler imgTexSampler [[sampler(1)]]
 )
 {
-    float4 sample = imgTex.sample(imgTexSampler, in.uv);
-    return tex.sample(texSampler, in.uv, uniforms.frame_index);
-    return sample * uniforms.frame_index;
+    uint2 imgTexCoord = uint2(imgTex.get_width() * in.uv.x, imgTex.get_height() * in.uv.y);
+    uint2 maskTexCoord = uint2(imgTexCoord.x % tex.get_width(), imgTexCoord.y % tex.get_height());
+
+    float4 imgTexel = imgTex.read(imgTexCoord);
+    float4 maskTexel = tex.read(maskTexCoord, uniforms.frame_index);
+
+    float value = max(max(imgTexel.r, imgTexel.g), imgTexel.b);
+    float on = value > maskTexel.r;
+    float4 final = float4(on, on, on, 1);
+
+    return (maskTexel * uniforms.show_mask) + ((1 - uniforms.show_mask) * final);
 }

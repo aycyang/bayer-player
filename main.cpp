@@ -43,9 +43,21 @@ SDL_GPUTransferBuffer* makeUploadTransferBuffer(SDL_GPUDevice* gpu_device,
   return tb;
 }
 
+float randomFloat() {
+  return static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+}
+
+std::byte randomByte() {
+  return std::byte(rand() % 0xff);
+}
+
+size_t randomSize(size_t max) {
+  return rand() % max;
+}
+
 struct Uniforms {
-  int frame_index;
-  uint32_t padding1;
+  int frame_index = 0;
+  int show_mask = 0;
   uint32_t padding2;
   uint32_t padding3;
 };
@@ -258,8 +270,8 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
     SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
 
     {
-      Uint32 w = 32;
-      Uint32 h = 32;
+      Uint32 w = 7;
+      Uint32 h = 7;
       SDL_GPUTextureCreateInfo createinfo = {
           .type = SDL_GPU_TEXTURETYPE_2D_ARRAY,
           .format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
@@ -271,28 +283,22 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
       };
       state->my_tex = SDL_CreateGPUTexture(state->gpu_device, &createinfo);
       std::vector<std::byte> v1(w * h, std::byte(0));
-      for (int y = 0; y < h; y++) {
-        int dy = abs(y - static_cast<int>(h) / 2);
-        for (int x = 0; x < w; x++) {
-          int dx = abs(x - static_cast<int>(w) / 2);
-          int r = sqrt(dx * dx + dy * dy);
-          int i = y * w + x;
-          if (r > std::min(w, h) / 2) {
-            v1[i] = std::byte(0xff);
-          }
-        }
-      }
       std::vector<std::byte> v2(w * h, std::byte(0));
-      for (int y = 0; y < h; y++) {
-        int dy = abs(y - static_cast<int>(h) / 2);
-        for (int x = 0; x < w; x++) {
-          int dx = abs(x - static_cast<int>(w) / 2);
-          int r = sqrt(dx * dx + dy * dy);
-          int i = y * w + x;
-          if (r <= std::min(w, h) / 2) {
-            v2[i] = std::byte(0xff);
-          }
-        }
+      uint8_t total_size = w * h;
+      for (uint8_t i = 0; i < total_size; i++) {
+        std::byte b = std::byte(256 * i / total_size);
+        v1[i] = b;
+        v2[i] = b;
+      }
+      for (int i = 0; i < w * h * 100; i++) {
+        size_t j = randomSize(w * h);
+        size_t k = randomSize(w * h);
+        std::swap(v1[j], v1[k]);
+      }
+      for (int i = 0; i < w * h * 99; i++) {
+        size_t j = randomSize(w * h);
+        size_t k = randomSize(w * h);
+        std::swap(v2[j], v2[k]);
       }
       SDL_GPUTransferBuffer* tb1 =
           makeUploadTransferBuffer(state->gpu_device, std::as_bytes(std::span(v1)));
@@ -423,6 +429,7 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
     }
 
     ImGui::InputInt("frame_index", &state->uniforms.frame_index);
+    ImGui::Checkbox("show_mask", reinterpret_cast<bool*>(&state->uniforms.show_mask));
 
     ImGui::End();
   }
@@ -495,6 +502,17 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         // vertex element.
         .offset = sizeof(float) * 2,
     };
+
+    {
+      static const Uint64 kFrameDuration = 200;
+      static const Uint64 kNumFrames = 2;
+      Uint64 ticks = SDL_GetTicks();
+      if ((ticks / kFrameDuration) % kNumFrames == 0) {
+        state->uniforms.frame_index = 0;
+      } else {
+        state->uniforms.frame_index = 1;
+      }
+    }
 
     SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
     state->uploadUniforms(copy_pass);
