@@ -44,10 +44,10 @@ SDL_GPUTransferBuffer* makeUploadTransferBuffer(SDL_GPUDevice* gpu_device,
 }
 
 struct Uniforms {
-  float r = 1;
-  float g = 0;
-  float b = 1;
-  float a = 1;
+  int frame_index;
+  uint32_t padding1;
+  uint32_t padding2;
+  uint32_t padding3;
 };
 
 // Doesn't own any of its members. Cleanup is handled by SDL lifecycle callbacks.
@@ -261,42 +261,69 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
       Uint32 w = 32;
       Uint32 h = 32;
       SDL_GPUTextureCreateInfo createinfo = {
-          .type = SDL_GPU_TEXTURETYPE_3D,
+          .type = SDL_GPU_TEXTURETYPE_2D_ARRAY,
           .format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
           .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
           .width = w,
           .height = h,
-          .layer_count_or_depth = 1,
+          .layer_count_or_depth = 2,
           .num_levels = 1,
       };
       state->my_tex = SDL_CreateGPUTexture(state->gpu_device, &createinfo);
-      std::vector<std::byte> v(w * h, std::byte(0));
+      std::vector<std::byte> v1(w * h, std::byte(0));
       for (int y = 0; y < h; y++) {
         int dy = abs(y - static_cast<int>(h) / 2);
         for (int x = 0; x < w; x++) {
           int dx = abs(x - static_cast<int>(w) / 2);
           int r = sqrt(dx * dx + dy * dy);
-          if (r > std::min(w, h) / 2) {
-            continue;
-          }
           int i = y * w + x;
-          v[i] = std::byte(0xff);
+          if (r > std::min(w, h) / 2) {
+            v1[i] = std::byte(0xff);
+          }
         }
       }
-      SDL_GPUTransferBuffer* tb =
-          makeUploadTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
-      SDL_GPUTextureTransferInfo src = {
-          .transfer_buffer = tb,
+      std::vector<std::byte> v2(w * h, std::byte(0));
+      for (int y = 0; y < h; y++) {
+        int dy = abs(y - static_cast<int>(h) / 2);
+        for (int x = 0; x < w; x++) {
+          int dx = abs(x - static_cast<int>(w) / 2);
+          int r = sqrt(dx * dx + dy * dy);
+          int i = y * w + x;
+          if (r <= std::min(w, h) / 2) {
+            v2[i] = std::byte(0xff);
+          }
+        }
+      }
+      SDL_GPUTransferBuffer* tb1 =
+          makeUploadTransferBuffer(state->gpu_device, std::as_bytes(std::span(v1)));
+      SDL_GPUTextureTransferInfo src1 = {
+          .transfer_buffer = tb1,
           .pixels_per_row = w,
           .rows_per_layer = h,
       };
-      SDL_GPUTextureRegion dst = {
+      SDL_GPUTextureRegion dst1 = {
           .texture = state->my_tex,
+          .layer = 0,
           .w = w,
           .h = h,
           .d = 1,
       };
-      SDL_UploadToGPUTexture(copy_pass, &src, &dst, false);
+      SDL_UploadToGPUTexture(copy_pass, &src1, &dst1, false);
+      SDL_GPUTransferBuffer* tb2 =
+          makeUploadTransferBuffer(state->gpu_device, std::as_bytes(std::span(v2)));
+      SDL_GPUTextureTransferInfo src2 = {
+          .transfer_buffer = tb2,
+          .pixels_per_row = w,
+          .rows_per_layer = h,
+      };
+      SDL_GPUTextureRegion dst2 = {
+          .texture = state->my_tex,
+          .layer = 1,
+          .w = w,
+          .h = h,
+          .d = 1,
+      };
+      SDL_UploadToGPUTexture(copy_pass, &src2, &dst2, false);
     }
 
     {
@@ -394,6 +421,8 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
     if (ImGui::Button("Upload image")) {
       SDL_ShowOpenFileDialog(uploadImgCallback, state, state->window, NULL, 0, NULL, false);
     }
+
+    ImGui::InputInt("frame_index", &state->uniforms.frame_index);
 
     ImGui::End();
   }
