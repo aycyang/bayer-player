@@ -15,6 +15,8 @@
 #include <SDL3/SDL_main.h>
 #include <SDL3_image/SDL_image.h>
 
+static const Uint64 kNumFrames = 16;
+
 std::vector<uint8_t> openFile(const std::filesystem::path& path) {
   std::vector<uint8_t> buf;
   std::ifstream ifs(path);
@@ -55,10 +57,118 @@ size_t randomSize(size_t max) {
   return rand() % max;
 }
 
+void matScalarAdd(std::span<uint8_t> m, uint8_t s) {
+  for (uint8_t& v : m) {
+    v += s;
+  }
+}
+
+void matScalarMult(std::span<uint8_t> m, uint8_t s) {
+  for (uint8_t& v : m) {
+    v *= s;
+  }
+}
+
+void matScalarMod(std::span<uint8_t> m, uint8_t s) {
+  for (uint8_t& v : m) {
+    v %= s;
+  }
+}
+
+std::vector<uint8_t> matCompose(std::span<const uint8_t> a,
+                                std::span<const uint8_t> b,
+                                std::span<const uint8_t> c,
+                                std::span<const uint8_t> d) {
+  assert(a.size() == b.size());
+  assert(b.size() == c.size());
+  assert(c.size() == d.size());
+  assert(a.size() == 1 || a.size() == 4 || a.size() == 16);
+  uint8_t r = sqrt(a.size());
+  std::vector<uint8_t> v(a.size() * 4);
+  for (size_t y = 0; y < r; y++) {
+    for (size_t x = 0; x < r; x++) {
+      size_t i_a = y * r * 2 + x;
+      size_t i_b = y * r * 2 + x + r;
+      size_t i_c = (y + r) * r * 2 + x;
+      size_t i_d = (y + r) * r * 2 + x + r;
+      size_t j = y * r + x;
+      v[i_a] = a[j];
+      v[i_b] = b[j];
+      v[i_c] = c[j];
+      v[i_d] = d[j];
+    }
+  }
+  return v;
+}
+
+void printMat(std::span<const uint8_t> m) {
+  size_t r = sqrt(m.size());
+  for (size_t y = 0; y < r; y++) {
+    for (size_t x = 0; x < r; x++) {
+      size_t i = y * r + x;
+      printf("%d ", m[i]);
+    }
+    printf("\n");
+  }
+}
+
+std::vector<uint8_t> bayer2x2() {
+  std::vector<uint8_t> result = {
+      0,
+      2,
+      3,
+      1,
+  };
+  return result;
+}
+
+std::vector<uint8_t> bayer4x4() {
+  std::vector<uint8_t> a = bayer2x2();
+  std::vector<uint8_t> b = bayer2x2();
+  std::vector<uint8_t> c = bayer2x2();
+  std::vector<uint8_t> d = bayer2x2();
+
+  matScalarMult(a, 4);
+  matScalarMult(b, 4);
+  matScalarMult(c, 4);
+  matScalarMult(d, 4);
+
+  matScalarAdd(b, 2);
+  matScalarAdd(c, 3);
+  matScalarAdd(d, 1);
+
+  std::vector<uint8_t> result = matCompose(a, b, c, d);
+  return result;
+}
+
+std::vector<uint8_t> bayer8x8() {
+  std::vector<uint8_t> a = bayer4x4();
+  std::vector<uint8_t> b = bayer4x4();
+  std::vector<uint8_t> c = bayer4x4();
+  std::vector<uint8_t> d = bayer4x4();
+
+  matScalarMult(a, 4);
+  matScalarMult(b, 4);
+  matScalarMult(c, 4);
+  matScalarMult(d, 4);
+
+  matScalarAdd(b, 2);
+  matScalarAdd(c, 3);
+  matScalarAdd(d, 1);
+
+  printMat(a);
+  printMat(b);
+  printMat(c);
+  printMat(d);
+
+  std::vector<uint8_t> result = matCompose(a, b, c, d);
+  return result;
+}
+
 struct Uniforms {
   int frame_index = 0;
   int show_mask = 0;
-  uint32_t padding2;
+  int show_orig = 0;
   uint32_t padding3;
 };
 
@@ -73,6 +183,9 @@ struct AppState {
   SDL_GPUTexture* img_tex;
 
   SDL_GPUBuffer* my_vb;
+
+  bool is_animated = false;
+  int frame_duration = 200;
 
   Uniforms uniforms;
   SDL_GPUBuffer* uniforms_gpu;
@@ -270,79 +383,52 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
     SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
 
     {
-      Uint32 w = 7;
-      Uint32 h = 7;
+      Uint32 w = 4;
+      Uint32 h = 4;
       SDL_GPUTextureCreateInfo createinfo = {
           .type = SDL_GPU_TEXTURETYPE_2D_ARRAY,
           .format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
           .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
           .width = w,
           .height = h,
-          .layer_count_or_depth = 2,
+          .layer_count_or_depth = kNumFrames,
           .num_levels = 1,
       };
       state->my_tex = SDL_CreateGPUTexture(state->gpu_device, &createinfo);
-      std::vector<std::byte> v1(w * h, std::byte(0));
-      std::vector<std::byte> v2(w * h, std::byte(0));
-      uint8_t total_size = w * h;
-      for (uint8_t i = 0; i < total_size; i++) {
-        std::byte b = std::byte(256 * i / total_size);
-        v1[i] = b;
-        v2[i] = b;
+      for (Uint32 z = 0; z < kNumFrames; z++) {
+        std::vector<uint8_t> v = bayer4x4();
+        matScalarAdd(v, z);
+        matScalarMod(v, 16);
+        matScalarMult(v, 16);
+        SDL_GPUTransferBuffer* tb =
+            makeUploadTransferBuffer(state->gpu_device, std::as_bytes(std::span(v)));
+        SDL_GPUTextureTransferInfo src = {
+            .transfer_buffer = tb,
+            .pixels_per_row = w,
+            .rows_per_layer = h,
+        };
+        SDL_GPUTextureRegion dst = {
+            .texture = state->my_tex,
+            .layer = z,
+            .w = w,
+            .h = h,
+            .d = 1,
+        };
+        SDL_UploadToGPUTexture(copy_pass, &src, &dst, false);
       }
-      for (int i = 0; i < w * h * 100; i++) {
-        size_t j = randomSize(w * h);
-        size_t k = randomSize(w * h);
-        std::swap(v1[j], v1[k]);
-      }
-      for (int i = 0; i < w * h * 99; i++) {
-        size_t j = randomSize(w * h);
-        size_t k = randomSize(w * h);
-        std::swap(v2[j], v2[k]);
-      }
-      SDL_GPUTransferBuffer* tb1 =
-          makeUploadTransferBuffer(state->gpu_device, std::as_bytes(std::span(v1)));
-      SDL_GPUTextureTransferInfo src1 = {
-          .transfer_buffer = tb1,
-          .pixels_per_row = w,
-          .rows_per_layer = h,
-      };
-      SDL_GPUTextureRegion dst1 = {
-          .texture = state->my_tex,
-          .layer = 0,
-          .w = w,
-          .h = h,
-          .d = 1,
-      };
-      SDL_UploadToGPUTexture(copy_pass, &src1, &dst1, false);
-      SDL_GPUTransferBuffer* tb2 =
-          makeUploadTransferBuffer(state->gpu_device, std::as_bytes(std::span(v2)));
-      SDL_GPUTextureTransferInfo src2 = {
-          .transfer_buffer = tb2,
-          .pixels_per_row = w,
-          .rows_per_layer = h,
-      };
-      SDL_GPUTextureRegion dst2 = {
-          .texture = state->my_tex,
-          .layer = 1,
-          .w = w,
-          .h = h,
-          .d = 1,
-      };
-      SDL_UploadToGPUTexture(copy_pass, &src2, &dst2, false);
     }
 
     {
       // clang-format off
       //    x    y     u  v
       std::vector<float> v = {
-          -.5, -.5,    0, 1,
-          -.5,  .5,    0, 0,
-           .5,  .5,    1, 0,
+          -1, -1,    0, 1,
+          -1,  1,    0, 0,
+           1,  1,    1, 0,
 
-          -.5, -.5,    0, 1,
-           .5, -.5,    1, 1,
-           .5,  .5,    1, 0,
+          -1, -1,    0, 1,
+           1, -1,    1, 1,
+           1,  1,    1, 0,
       };
       // clang-format on
       std::span<const std::byte> b = std::as_bytes(std::span(v));
@@ -429,7 +515,10 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
     }
 
     ImGui::InputInt("frame_index", &state->uniforms.frame_index);
+    ImGui::InputInt("frame_duration (ms)", &state->frame_duration);
     ImGui::Checkbox("show_mask", reinterpret_cast<bool*>(&state->uniforms.show_mask));
+    ImGui::Checkbox("show_orig", reinterpret_cast<bool*>(&state->uniforms.show_orig));
+    ImGui::Checkbox("is_animated", &state->is_animated);
 
     ImGui::End();
   }
@@ -503,15 +592,9 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
         .offset = sizeof(float) * 2,
     };
 
-    {
-      static const Uint64 kFrameDuration = 200;
-      static const Uint64 kNumFrames = 2;
+    if (state->is_animated) {
       Uint64 ticks = SDL_GetTicks();
-      if ((ticks / kFrameDuration) % kNumFrames == 0) {
-        state->uniforms.frame_index = 0;
-      } else {
-        state->uniforms.frame_index = 1;
-      }
+      state->uniforms.frame_index = (ticks / state->frame_duration) % kNumFrames;
     }
 
     SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
